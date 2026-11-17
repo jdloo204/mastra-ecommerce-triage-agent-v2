@@ -1,15 +1,16 @@
 import { Agent } from "@mastra/core/agent";
+import { google } from "@ai-sdk/google";
 
 export const policyAnalystAgent = new Agent({
   id: "policy-analyst",
   name: "Return Policy Analyst",
   instructions: `
-    You are an e-commerce compliance specialist. 
+    You are an e-commerce compliance specialist.
     Compare the customer's email against the provided Store Return Policy.
-    Determine if the request is ELIGIBLE, INELIGIBLE, or NEEDS_HUMAN_REVIEW.
-    Keep your reasoning concise, factual, and cite the exact policy rule.
+    You MUST respond ONLY with valid raw JSON (no markdown, no backticks) in this exact format:
+    {"decision": "ELIGIBLE" | "INELIGIBLE" | "NEEDS_HUMAN_REVIEW", "reason": "concise factual reason citing exact policy rules"}
   `,
-  model: "google/gemini-2.5-flash",
+  model: google("gemini-3.8-flash"),
 });
 
 export const brandResponderAgent = new Agent({
@@ -23,5 +24,5 @@ export const brandResponderAgent = new Agent({
     - If NEEDS_HUMAN_REVIEW: Let them know a senior specialist is reviewing their order details within 4 hours.
     Do not invent policies. Keep it under 120 words.
   `,
-  model: "google/gemini-2.5-flash",
+  model: google("gemini-3.8-flash"),
 });

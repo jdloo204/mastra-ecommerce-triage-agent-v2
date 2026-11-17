@@ -1,7 +1,7 @@
 import { createWorkflow, createStep } from "@mastra/core/workflows";
 import { z } from "zod";
+import * as cheerio from "cheerio";
 import { policyAnalystAgent, brandResponderAgent } from "../agents/ecommerce-agents";
-import { scrapePolicyTool } from "../tools/scrape-policy-tool";
 
 const triageInputSchema = z.object({
   storeName: z.string(),
@@ -17,16 +17,38 @@ const fetchPolicyStep = createStep({
     customerEmail: z.string(),
     policyText: z.string(),
   }),
-  execute: async ({ inputData, runtimeContext }) => {
-    const scraped = await scrapePolicyTool.execute({
-      context: { url: inputData.policyUrl },
-      runtimeContext,
+  execute: async ({ inputData }) => {
+    const response = await fetch(inputData.policyUrl, {
+      signal: AbortSignal.timeout(15000),
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        Accept: "text/html,application/xhtml+xml",
+      },
     });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch policy (${response.status}): ${response.statusText}`);
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    $("script, style, nav, footer, header, noscript, iframe").remove();
+
+    const mainText = $("main").text().trim();
+    const bodyText = $("body").text().trim();
+    const rawText = mainText.length > 200 ? mainText : bodyText;
+    const cleanText = rawText.replace(/\s+/g, " ").trim().slice(0, 6000);
+
+    if (!cleanText) {
+      throw new Error("Policy page returned empty text.");
+    }
 
     return {
       storeName: inputData.storeName,
       customerEmail: inputData.customerEmail,
-      policyText: scraped.policyText,
+      policyText: cleanText,
     };
   },
 });
@@ -52,16 +74,32 @@ const analyzePolicyStep = createStep({
     `;
 
     const response = await policyAnalystAgent.generate(prompt, {
-      structuredOutput: {
-        schema: z.object({
-          decision: z.enum(["ELIGIBLE", "INELIGIBLE", "NEEDS_HUMAN_REVIEW"]),
-          reason: z.string(),
-        }),
-      },
+      abortSignal: AbortSignal.timeout(25000),
     });
 
+    const cleanedJson = response.text
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
+
+    let parsed: { decision?: string; reason?: string } = {};
+    try {
+      parsed = JSON.parse(cleanedJson);
+    } catch {
+      parsed = {
+        decision: "NEEDS_HUMAN_REVIEW",
+        reason: cleanedJson.slice(0, 300),
+      };
+    }
+
+    const validDecisions = ["ELIGIBLE", "INELIGIBLE", "NEEDS_HUMAN_REVIEW"] as const;
+    const decision = validDecisions.includes(parsed.decision as any)
+      ? (parsed.decision as (typeof validDecisions)[number])
+      : "NEEDS_HUMAN_REVIEW";
+
     return {
-      ...response.object,
+      decision,
+      reason: parsed.reason || "Evaluated against store return policy.",
       customerEmail: inputData.customerEmail,
       storeName: inputData.storeName,
     };
@@ -89,7 +127,9 @@ const draftReplyStep = createStep({
       Original Customer Email: ${inputData.customerEmail}
     `;
 
-    const response = await brandResponderAgent.generate(prompt);
+    const response = await brandResponderAgent.generate(prompt, {
+      abortSignal: AbortSignal.timeout(25000),
+    });
 
     return {
       decision: inputData.decision,
